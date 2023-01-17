@@ -10,6 +10,7 @@ set(MODULES
   intercom
   kaoptions
   vidloop
+  aulatency
 )
 
 if(DEFINED EXTRA_MODULES)
