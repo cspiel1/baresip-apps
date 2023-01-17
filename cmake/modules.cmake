@@ -33,3 +33,7 @@ endif()
 if(DEFINED EXTRA_MODULES)
   list(APPEND MODULES ${EXTRA_MODULES})
 endif()
+
+if(USE_TRACE)
+  list(APPEND MODULES aulatency)
+endif()

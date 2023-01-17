@@ -1,0 +1,72 @@
+#
+# baresip configuration
+#
+
+#------------------------------------------------------------------------------
+
+# SIP
+sip_listen		0.0.0.0:15060
+
+# Audio
+audio_buffer        	20-450     	# ms
+audio_buffer_mode	adaptive
+audio_silence		0.0
+audio_path		/usr/local/share/baresip
+audio_player		aubridge,pseudo0
+audio_source		aubridge,pseudo0
+audio_level		no
+audio_txmode		thread		# poll, thread
+
+jitter_buffer_type	adaptive	# off, fixed, adaptive
+jitter_buffer_delay	0-40		# frames
+rtp_stats		no
+statmode_default	off
+
+module_path		/usr/local/lib/baresip/modules
+
+# UI Modules
+module			cons.so
+module			stdio.so
+
+# Audio codec Modules (in order)
+# module			opus.so
+module			g722.so
+module			g711.so
+
+# Audio filter Modules (in encoding order)
+module			auresamp.so
+module			auconv.so
+
+# Audio driver Modules
+module			aubridge.so
+
+module_app		account.so
+
+#------------------------------------------------------------------------------
+# Application Modules
+
+module_app		menu.so
+module_app		netroam.so
+
+cons_listen		127.0.0.1:15555
+
+# Video
+video_source		v4l2,/dev/video0
+video_display		x11,nil
+video_fps		1.5
+
+module			x11.so
+module			avcodec.so
+module			v4l2.so
+
+# opus
+opus_bitrate 64000
+# opus_stereo		yes
+opus_sprop_stereo	no
+# opus_cbr		no
+# opus_inbandfec yes
+# opus_dtx		no
+#opus_mirror		no
+# opus_complexity		5
+# opus_application	audio	# {voip,audio}
+# opus_samplerate		48000
