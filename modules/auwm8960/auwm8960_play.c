@@ -75,30 +75,31 @@ static int write_thread(void *arg)
 	struct auplay_st *st = arg;
 	struct auframe af;
 	int num_frames;
-	int err;
+	int err = 0;
 
 	num_frames = st->prm.srate * st->prm.ptime / 1000;
 
 	auframe_init(&af, st->prm.fmt, st->sampv, st->sampc, st->prm.srate,
 		     st->prm.ch);
 
-	err = auwm8960_start(I2O_PLAY, &st->prm);
+/*        err = auwm8960_start(I2O_PLAY, &st->prm);*/
 	if (err) {
 		warning("auwm8960: could not start auplay\n");
 		return err;
 	}
 
-	st->i2s = auwm8960_i2s();
-	if (!st->i2s)
-		return EINVAL;
+/*        st->i2s = auwm8960_i2s();*/
+/*        if (!st->i2s)*/
+/*                return EINVAL;*/
 
 	while (re_atomic_rlx(&st->run)) {
 		st->wh(&af, st->arg);
 		convert_sampv(st, st->sampc);
-		i2s_buf_write(st->i2s, st->pcm, st->sampc * 2);
+/*                printf("%s:%d HUUUUUU sampc=%u\n", __func__, __LINE__, st->sampc);*/
+/*                i2s_buf_write(st->i2s, st->pcm, st->sampc * 2);*/
 	}
 
-	auwm8960_stop(I2O_PLAY);
+/*        auwm8960_stop(I2O_PLAY);*/
 	info("auwm8960: stopped auplay thread\n");
 
 	return 0;
