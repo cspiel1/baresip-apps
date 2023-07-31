@@ -1,7 +1,7 @@
 /**
  * @file auwm8960_play.c wm8960 I2S audio driver module - player
  *
- * Copyright (C) 2023 cspiel.at
+ * Copyright (C) 2023 Christian Spielberger
  */
 #include <sys/types.h>
 #include <sys/time.h>
@@ -63,6 +63,7 @@ static void convert_sampv(struct auplay_st *st, size_t sampc)
 {
 	uint32_t j;
 	int16_t *sampv = st->sampv;
+	return;
 	for (j = 0; j < sampc; j++) {
 		uint32_t v = sampv[j];
 		st->pcm[j] = v << 17;
@@ -74,10 +75,7 @@ static int write_thread(void *arg)
 {
 	struct auplay_st *st = arg;
 	struct auframe af;
-	int num_frames;
 	int err = 0;
-
-	num_frames = st->prm.srate * st->prm.ptime / 1000;
 
 	auframe_init(&af, st->prm.fmt, st->sampv, st->sampc, st->prm.srate,
 		     st->prm.ch);
@@ -95,8 +93,8 @@ static int write_thread(void *arg)
 	while (re_atomic_rlx(&st->run)) {
 		st->wh(&af, st->arg);
 		convert_sampv(st, st->sampc);
-/*                printf("%s:%d HUUUUUU sampc=%u\n", __func__, __LINE__, st->sampc);*/
 /*                i2s_buf_write(st->i2s, st->pcm, st->sampc * 2);*/
+		sys_msleep(20);
 	}
 
 /*        auwm8960_stop(I2O_PLAY);*/

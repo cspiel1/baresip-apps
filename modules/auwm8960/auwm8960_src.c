@@ -1,28 +1,28 @@
 /**
- * @file auwm8960_src.c freeRTOS I2S audio driver module - recorder
+ * @file auwm8960_src.c wm8960 I2S audio driver module - source
  *
- * Copyright (C) 2019 Creytiv.com
+ * Copyright (C) 2023 Christian Spielberger
  */
 #include <sys/types.h>
 #include <sys/time.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <pthread.h>
-#include "freertos/FreeRTOS.h"
-#include "driver/i2s.h"
+#include <re_atomic.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
 #include "auwm8960.h"
 
+#include <zephyr/drivers/i2s.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/kernel.h>
+
 
 struct ausrc_st {
-	const struct ausrc *as;  /* pointer to base-class (inheritance) */
-	pthread_t thread;
+	thrd_t thread;
 	bool run;
 	void *sampv;
 	size_t sampc;
-	size_t bytes;
 	ausrc_read_h *rh;
 	void *arg;
 	struct ausrc_prm prm;
@@ -30,6 +30,7 @@ struct ausrc_st {
 	uint32_t *pcm;
 };
 
+static struct ausrc_st *d;
 
 static void ausrc_destructor(void *arg)
 {
@@ -39,7 +40,7 @@ static void ausrc_destructor(void *arg)
 	if (st->run) {
 		info("auwm8960: stopping recording thread\n");
 		st->run = false;
-		(void)pthread_join(st->thread, NULL);
+		thrd_join(st->thread, NULL);
 	}
 
 	mem_deref(st->sampv);
@@ -47,19 +48,13 @@ static void ausrc_destructor(void *arg)
 }
 
 
-static void convert_pcm(struct ausrc_st *st, size_t i, size_t n)
+static void convert_pcm(struct ausrc_st *st, size_t sampc)
 {
 	uint32_t j;
 	uint16_t *sampv = st->sampv;
-	for (j = 0; j < n; j++) {
+	for (j = 0; j < sampc; j++) {
 		uint32_t v = st->pcm[j];
-		uint16_t *o = sampv + i + j;
-/*        if (j==0)*/
-/*            info("mic=%d %02x %02x %02x %02x", v,*/
-/*                (uint8_t) ((v & 0xff000000) >> 24),*/
-/*                (uint8_t) ((v & 0xff0000) >> 16),*/
-/*                (uint8_t) ((v & 0xff00) >> 8),*/
-/*                (uint8_t) ((v & 0xff)) );*/
+		uint16_t *o = sampv + j;
 		*o = v >> 15;
 		/* if negative fill with ff */
 		if (v & 0x80000000)
@@ -68,55 +63,51 @@ static void convert_pcm(struct ausrc_st *st, size_t i, size_t n)
 }
 
 
-static void *read_thread(void *arg)
+static int auwm_read_thread(void *arg)
 {
-	struct ausrc_st *st = arg;
+	int num_frames;
+	struct auframe af;
 	int err;
+	struct ausrc_st *st = d;
 
-	err = auwm8960_start(st->prm.srate, I2O_RECO);
+/*        err = auwm8960_start(st->prm.srate, I2O_RECO);*/
 
+	num_frames = 0;
+	err = 0;
 	if (err) {
 		warning("auwm8960: could not start ausrc\n");
-		return NULL;
+		return err;
 	}
-/*    REG_SET_BIT(  I2S_TIMING_REG(I2S_PORT),BIT(9));   |+  #include "soc/i2s_reg.h"   I2S_NUM -> 0 or 1+|*/
-/*    Also make sure the Philips mode is active*/
-/*    REG_SET_BIT( I2S_CONF_REG(I2S_PORT), I2S_RX_MSB_SHIFT);*/
 
+	auframe_init(&af, st->prm.fmt, st->sampv, st->sampc,
+		     st->prm.srate, st->prm.ch);
 	while (st->run) {
-		size_t i;
-
-		for (i = 0; i + DMA_SIZE / 4 <= st->sampc;) {
-			size_t n = 0;
-			i2s_read(I2S_PORT, st->pcm, DMA_SIZE, &n, portMAX_DELAY);
-
-			if (n == 0)
-				break;
-
-			convert_pcm(st, i, n / 4);
-			i += (n / 4);
+		/* set frames read really */
+		if (st->prm.ch && st->prm.srate) {
+			num_frames += st->sampc / st->prm.ch;
+			af.timestamp = num_frames * AUDIO_TIMEBASE / st->prm.srate;
 		}
+/*                convert_pcm(st, st->sampc);*/
 
-		st->rh(st->sampv, st->sampc, st->arg);
+		st->rh(&af, st->arg);
+		sys_msleep(20);
 	}
 
-	auwm8960_stop(I2O_RECO);
+/*        auwm8960_stop(I2O_RECO);*/
 	info("auwm8960: stopped ausrc thread\n");
 
-	return NULL;
+	return 0;
 }
 
 
 int auwm8960_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
-			     struct media_ctx **ctx,
-			     struct ausrc_prm *prm, const char *device,
-			     ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
+		   struct ausrc_prm *prm, const char *device,
+		   ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
 	struct ausrc_st *st;
 	size_t sampc;
 	int err;
 
-	(void) ctx;
 	(void) device;
 	(void) errh;
 
@@ -139,33 +130,34 @@ int auwm8960_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (!st)
 		return ENOMEM;
 
+	d = st;
 	st->prm = *prm;
-	st->as  = as;
 	st->rh  = rh;
 	st->arg = arg;
 
 	st->sampc = sampc;
-	st->bytes = 2 * sampc;
-	st->sampv = mem_zalloc(st->bytes, NULL);
+	st->sampv = mem_zalloc(st->sampc * 2, NULL);
 	if (!st->sampv) {
 		err = ENOMEM;
 		goto out;
 	}
-	st->pcm = mem_zalloc(DMA_SIZE, NULL);
+	st->pcm = mem_zalloc(st->sampc * 2, NULL);
 	if (!st->pcm) {
 		err = ENOMEM;
 		goto out;
 	}
 
+	info("%s starting src thread sampc=%lu\n", __func__,
+	     (unsigned long) st->sampc);
 	st->run = true;
-	info("%s starting src thread\n", __func__);
-	err = pthread_create(&st->thread, NULL, read_thread, st);
+	err = thread_create_name(&st->thread, "auwm8960_src", auwm_read_thread,
+				 NULL);
 	if (err) {
 		st->run = false;
 		goto out;
 	}
 
-	debug("auwm8960: recording\n");
+	debug("auwm8960: recording started\n");
 
  out:
 	if (err)

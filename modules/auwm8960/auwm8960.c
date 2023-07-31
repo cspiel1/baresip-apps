@@ -33,9 +33,9 @@ static int auwm8960_init(void)
 	int err;
 
 	memset(&wm8960, 0, sizeof(wm8960));
-/*        err  = ausrc_register(&ausrc, baresip_ausrcl(),*/
-/*                              "auwm8960", auwm8960_src_alloc);*/
-	err = auplay_register(&auplay, baresip_auplayl(),
+	err  = ausrc_register(&ausrc, baresip_ausrcl(),
+			      "auwm8960", auwm8960_src_alloc);
+	err |= auplay_register(&auplay, baresip_auplayl(),
 			       "auwm8960", auwm8960_play_alloc);
 
 
