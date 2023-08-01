@@ -75,6 +75,8 @@ static int write_thread(void *arg)
 {
 	struct auplay_st *st = arg;
 	struct auframe af;
+	uint64_t tick;
+	uint64_t dt = st->prm.ptime*1000;
 	int err = 0;
 
 	auframe_init(&af, st->prm.fmt, st->sampv, st->sampc, st->prm.srate,
@@ -90,11 +92,13 @@ static int write_thread(void *arg)
 /*        if (!st->i2s)*/
 /*                return EINVAL;*/
 
+	tick = tmr_jiffies_usec() + dt;
 	while (re_atomic_rlx(&st->run)) {
 		st->wh(&af, st->arg);
 		convert_sampv(st, st->sampc);
 /*                i2s_buf_write(st->i2s, st->pcm, st->sampc * 2);*/
-		sys_msleep(20);
+		sys_usleep(tick - tmr_jiffies_usec());
+		tick += dt;
 	}
 
 /*        auwm8960_stop(I2O_PLAY);*/

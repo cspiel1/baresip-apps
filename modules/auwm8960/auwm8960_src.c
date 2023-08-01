@@ -67,8 +67,10 @@ static int auwm_read_thread(void *arg)
 {
 	int num_frames;
 	struct auframe af;
-	int err;
 	struct ausrc_st *st = d;
+	uint64_t tick;
+	uint64_t dt = st->prm.ptime*1000;
+	int err;
 
 /*        err = auwm8960_start(st->prm.srate, I2O_RECO);*/
 
@@ -81,6 +83,8 @@ static int auwm_read_thread(void *arg)
 
 	auframe_init(&af, st->prm.fmt, st->sampv, st->sampc,
 		     st->prm.srate, st->prm.ch);
+
+	tick = tmr_jiffies_usec() + dt;
 	while (st->run) {
 		/* set frames read really */
 		if (st->prm.ch && st->prm.srate) {
@@ -90,7 +94,8 @@ static int auwm_read_thread(void *arg)
 /*                convert_pcm(st, st->sampc);*/
 
 		st->rh(&af, st->arg);
-		sys_msleep(20);
+		sys_usleep(tick - tmr_jiffies_usec());
+		tick += dt;
 	}
 
 /*        auwm8960_stop(I2O_RECO);*/
