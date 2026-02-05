@@ -122,10 +122,10 @@ static bool aulat_detect_impulse(struct aulat *aulat,
 	for (size_t j = dj; j < 2*dj; ++j) {
 		v = vp[j];
 		if ( (aulat->cnt & 1) && v < -SAMPLE_LEVEL / 2)
-			cnt++;
+			++cnt;
 
 		else if (!(aulat->cnt & 1) && v > SAMPLE_LEVEL / 2)
-			cnt++;
+			++cnt
 
 		if (cnt > dj/2)
 			return true;
