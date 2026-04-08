@@ -67,6 +67,33 @@ else()
     -Wvla
   )
 
+  # Add flags for hardening the binary against attacks
+  list(APPEND c_flags
+    -Wformat -Wformat=2
+    -Werror=format-security
+    -fstrict-flex-arrays=3
+    -fstack-clash-protection -fstack-protector-strong
+
+    $<$<STREQUAL:"${CMAKE_SYSTEM_PROCESSOR}","aarch64">: -mbranch-protection=standard>
+  )
+
+  if (CMAKE_C_COMPILER_ID MATCHES "GNU")
+    list (APPEND c_flags
+      -fanalyzer
+      -Wtrampolines
+      -Wimplicit-fallthrough
+    )
+  endif()
+
+  if(CMAKE_BUILD_TYPE MATCHES "^Rel.*")
+    list (APPEND c_flags
+      -O2
+      -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3
+      -fno-delete-null-pointer-checks -fno-strict-overflow
+      -fno-strict-aliasing -ftrivial-auto-var-init=zero
+    )
+  endif()
+
   if(CMAKE_C_COMPILER_ID MATCHES "Clang")
     list(APPEND c_flags
       -Watomic-implicit-seq-cst
@@ -77,8 +104,17 @@ else()
 
   endif()
 
+  set (ld_flags
+    -Wl,-z,noexecstack
+    -Wl,-z,relro -Wl,-z,now
+    -Wl,--as-needed -Wl,--no-copy-dt-needed-entries
+  )
+
   add_compile_options(
     "$<$<COMPILE_LANGUAGE:C>:${c_flags}>"
+  )
+  add_link_options(
+    "$<$<COMPILE_LANGUAGE:C>:${ld_flags}>"
   )
 endif()
 
