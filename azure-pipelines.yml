@@ -1,0 +1,106 @@
+# Azure Pipeline file for building and testing baresip-apps
+#
+# Parameters:
+#   openssl_version:        Available OpenSSL versions to build against
+#   newest_openssl_version: The newest OpenSSL version (used for static analysis)
+---
+parameters:
+  - name: 'openssl_version'
+    type: object
+    default:
+      - 3.0.13
+      - 3.2.1
+  - name: 'newest_openssl_version'
+    type: string
+    default: '3.2.1'
+
+variables:
+  - name: CMAKE_GENERATOR
+    value: Ninja
+  - name: APT_DEPS_COMMON
+    value: "ninja-build libsystemd-dev libglib2.0-dev libssl-dev valgrind clang-tools"
+  - name: OPENSSL_ROOT_DIR
+    value: $(System.DefaultWorkingDirectory)/openssl
+  - name: STAGING_DIR
+    value: $(System.DefaultWorkingDirectory)/staging
+
+trigger:
+  branches:
+    include:
+      - commend
+      - sprint
+
+pr:
+  drafts: true
+  branches:
+    include:
+      - commend
+      - sprint
+
+resources:
+  repositories:
+    - repository: re
+      type: git
+      name: core-components/re
+      ref: sprint
+    - repository: baresip
+      type: git
+      name: core-components/baresip
+      ref: sprint
+
+jobs:
+- ${{ each version in parameters.openssl_version }}:
+  - job: build_openssl_${{ replace(version, '.', '_') }}
+    displayName: 'Build with OpenSSL ${{ version }}'
+    pool:
+      vmImage: 'ubuntu-latest'
+
+    steps:
+    - template: azure/setup.yml
+      parameters:
+        openssl_version: '${{ version }}'
+
+    - task: CMake@1
+      displayName: 'CMake prepare baresip-apps'
+      inputs:
+        cmakeArgs: >-
+          -B build -S .
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_PREFIX_PATH=$(STAGING_DIR)
+          -DCMAKE_BUILD_RPATH=$(STAGING_DIR)/lib
+        workingDirectory: '$(System.DefaultWorkingDirectory)/baresip-apps'
+
+    - task: CMake@1
+      displayName: 'CMake build baresip-apps'
+      inputs:
+        cmakeArgs: '--build build -j'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/baresip-apps'
+
+- job: static_analysis
+  displayName: 'Static Code Analysis'
+  pool:
+    vmImage: 'ubuntu-latest'
+
+  steps:
+  - template: azure/setup.yml
+    parameters:
+      openssl_version: '${{ parameters.newest_openssl_version }}'
+
+  - task: CMake@1
+    displayName: 'Generate CMake Build Environment for baresip-apps'
+    inputs:
+      cmakeArgs: >-
+        -B build
+        -DCMAKE_C_COMPILER=clang
+        -DCMAKE_BUILD_TYPE=Debug
+        -DCMAKE_PREFIX_PATH=$(STAGING_DIR)
+        -DCMAKE_BUILD_RPATH=$(STAGING_DIR)/lib
+      workingDirectory: '$(System.DefaultWorkingDirectory)/baresip-apps'
+
+  - task: Bash@3
+    displayName: 'Run clang static code analyzer'
+    inputs:
+      targetType: 'inline'
+      script: |
+        scan-build --status-bugs ${{ lower(variables.CMAKE_GENERATOR) }} -C build
+      workingDirectory: '$(System.DefaultWorkingDirectory)/baresip-apps'

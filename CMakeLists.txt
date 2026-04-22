@@ -79,7 +79,6 @@ else()
 
   if (CMAKE_C_COMPILER_ID MATCHES "GNU")
     list (APPEND c_flags
-      -fanalyzer
       -Wtrampolines
       -Wimplicit-fallthrough
     )

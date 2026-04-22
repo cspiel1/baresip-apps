@@ -1,0 +1,62 @@
+parameters:
+  - name: openssl_version
+    type: string
+
+steps:
+- checkout: 'self'
+  displayName    : 'Checkout baresip-apps'
+  clean          : 'true'
+  fetchTags      : 'false'
+  continueOnError: 'false'
+
+- checkout: 're'
+  displayName    : 'Checkout re'
+  clean          : 'true'
+  fetchTags      : 'false'
+  continueOnError: 'false'
+
+- checkout: 'baresip'
+  displayName    : 'Checkout baresip'
+  clean          : 'true'
+  fetchTags      : 'false'
+  continueOnError: 'false'
+
+- task: Bash@3
+  displayName: 'Install dependencies'
+  inputs:
+    targetType: 'inline'
+    script: |
+      sudo apt update && \
+      sudo apt install --fix-missing $(APT_DEPS_COMMON)
+
+- task: UniversalPackages@0
+  displayName: 'Download Prebuilt OpenSSL ${{ parameters.openssl_version }}'
+  inputs:
+    command: 'download'
+    feedsToUse: 'internal'
+    vstsFeed: 'core-components/commend-core-libs'
+    vstsFeedPackage: 'openssl'
+    vstsPackageVersion: '${{ parameters.openssl_version }}'
+    downloadDirectory: '$(OPENSSL_ROOT_DIR)'
+
+- task: Bash@3
+  displayName: 'Build and Install re'
+  inputs:
+    targetType: 'inline'
+    script: |
+      cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug \
+                          -DCMAKE_INSTALL_PREFIX=$(STAGING_DIR) && \
+      cmake --build build -j && \
+      cmake --install build
+    workingDirectory: '$(System.DefaultWorkingDirectory)/re'
+
+- task: Bash@3
+  displayName: 'Build and Install baresip'
+  inputs:
+    targetType: 'inline'
+    script: |
+      cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug \
+                          -DCMAKE_INSTALL_PREFIX=$(STAGING_DIR) && \
+      cmake --build build -j && \
+      cmake --install build
+    workingDirectory: '$(System.DefaultWorkingDirectory)/baresip'
