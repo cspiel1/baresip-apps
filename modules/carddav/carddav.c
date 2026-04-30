@@ -48,21 +48,21 @@ struct carddav_context
 	struct contacts *contacts;
 	uint32_t buf_len;
 	uint32_t buf_used;
-	char * buf_a;
-	char * buf_b;
-	char * gateway;
-	const char * user;
-	const char * url;
+	char *buf_a;
+	char *buf_b;
+	char *gateway;
+	const char *user;
+	const char *url;
 	unsigned count;
 };
 
 #define CARDDAV "(CardDAV)"
 
 
-static bool get_vcard_attr(const char * cardstart,
-                    uintptr_t cardend,
-                    const char * attr,
-                    char result[512])
+static int get_vcard_attr(const char *cardstart,
+                          uintptr_t cardend,
+                          const char *attr,
+                          char result[512])
 {
 	char attr2[32];
 	unsigned attr_len = re_snprintf(attr2,
@@ -81,7 +81,7 @@ static bool get_vcard_attr(const char * cardstart,
 		               attr2, attr_len);
 
 		if (!found)
-			return false;
+			return ENOENT;
 	}
 
 	found+=attr_len;
@@ -91,15 +91,15 @@ static bool get_vcard_attr(const char * cardstart,
 	                       "&#13;", 4);
 
 	if (!attrend)
-		return false;
+		return ENOENT;
 
 	str_ncpy(result, found, (uintptr_t)attrend-(uintptr_t)found+1);
-	return true;
+	return 0;
 }
 
 
-static struct contact  * in_contacts(struct contacts * contacts,
-                                     const char * uri)
+static struct contact *in_contacts(struct contacts *contacts,
+                                   const char *uri)
 {
 	struct pl pl;
 	struct sip_addr addr;
@@ -118,7 +118,7 @@ static struct contact  * in_contacts(struct contacts * contacts,
 }
 
 
-static char * last_column(char * s)
+static char *last_column(char *s)
 {
 	unsigned len = strlen(s);
 	while (len) {
@@ -131,18 +131,19 @@ static char * last_column(char * s)
 }
 
 
-static int process_card(const char * cardstart,
+static int process_card(const char *cardstart,
                          uintptr_t cardend,
-                         struct carddav_context * context)
+                         struct carddav_context *context)
 {
 	char name[512] = {0};
 	char tel[512] = {0};
 	char addr[1024] = {0};
+	int e = get_vcard_attr(cardstart, cardend, "\nFN", name);
+	if (e)
+		return e;
 
-	if (!get_vcard_attr(cardstart, cardend, "\nFN", name))
-		return EINVAL;
-
-	if (get_vcard_attr(cardstart, cardend, "\nIMPP", tel)) {
+	e = get_vcard_attr(cardstart, cardend, "\nIMPP", tel);
+	if (!e) {
 		char * pos = last_column(tel);
 		if (!pos)
 			return EINVAL;
@@ -166,7 +167,10 @@ static int process_card(const char * cardstart,
 		else debug("carddav: Non-SIP IMPP %s\n", tel);
 	}
 
-	if (!addr[0] && get_vcard_attr(cardstart, cardend, "\nTEL", tel)) {
+	if (!addr[0]) {
+		e = get_vcard_attr(cardstart, cardend, "\nTEL", tel);
+		if (e)
+			return e;
 		const char * pos = last_column(tel);
 		if (!pos)
 			return EINVAL;
@@ -197,11 +201,11 @@ static int process_card(const char * cardstart,
 		}
 
 		re_snprintf(addr+len, sizeof(addr)-len,
-			    "@%s>", context->gateway);
+		            "@%s>", context->gateway);
 	}
 
 	if (!addr[0])
-		return EINVAL;
+		return ENOENT;
 
 	if (in_contacts(context->contacts, addr)) {
 		info("carddav: Duplicate SIP %s\n", addr);
@@ -212,7 +216,7 @@ static int process_card(const char * cardstart,
 	pl_set_str(&pl, addr);
 
 	info("carddav: Adding %s\n", addr);
-	int e = contact_add(context->contacts, NULL, &pl);
+	e = contact_add(context->contacts, NULL, &pl);
 	if (!e)
 		context->count++;
 	else
@@ -224,9 +228,9 @@ static int process_card(const char * cardstart,
 static size_t writefunc(const void *ptr,
                         size_t size,
                         size_t nmemb,
-                        void * userdata)
+                        void *userdata)
 {
-	struct carddav_context * context = userdata;
+	struct carddav_context *context = userdata;
 
 	size_t total = size*nmemb;
 
@@ -244,10 +248,10 @@ static size_t writefunc(const void *ptr,
 
 	context->buf_used += total;
 
-	char * pos = memmem(context->buf_a,
-	                    context->buf_used,
-	                    "BEGIN:VCARD",
-	                    11);
+	char *pos = memmem(context->buf_a,
+	                   context->buf_used,
+	                   "BEGIN:VCARD",
+	                   11);
 
 	if (!pos) {
 		debug("carddav: No card started after %u.\n",
@@ -255,9 +259,9 @@ static size_t writefunc(const void *ptr,
 		return total;
 	}
 
-	char * end = context->buf_a + context->buf_used;
-	char * cardend = memmem(pos,
-	                        PTRDIFF(end, pos),
+	char *end = context->buf_a + context->buf_used;
+	char *cardend = memmem(pos,
+	                       PTRDIFF(end, pos),
 	                       "END:VCARD",
 	                       9);
 
@@ -295,7 +299,7 @@ static size_t writefunc(const void *ptr,
 	str_ncpy(context->buf_b, lastpos, remaining);
 	context->buf_used = remaining;
 
-	char * t = context->buf_a;
+	char *t = context->buf_a;
 	context->buf_a = context->buf_b;
 	context->buf_b = t;
 
@@ -303,15 +307,15 @@ static size_t writefunc(const void *ptr,
 }
 
 
-static void move_contacts(struct list * contacts_a,
-                          struct list * contacts_b,
-                          struct contacts * contacts)
+static void move_contacts(struct list *contacts_a,
+                          struct list *contacts_b,
+                          struct contacts *contacts)
 {
 	info("carddav: wipe existing contacts.\n");
-	struct le * cur = list_head(contacts_a);
+	struct le *cur = list_head(contacts_a);
 
 	while (cur) {
-		struct le * next = cur->next;
+		struct le *next = cur->next;
 		mem_ref(cur->data);
 		contact_remove(contacts, cur->data);
 		if (contacts_b)
@@ -321,7 +325,7 @@ static void move_contacts(struct list * contacts_a,
 }
 
 
-static void upload(struct carddav_context * context, const char * name)
+static void upload(struct carddav_context *context, const char *name)
 {
 	CURL *curl = curl_easy_init();
 	if (curl) {
@@ -369,9 +373,9 @@ static void upload(struct carddav_context * context, const char * name)
 }
 
 
-static void upload_phone_contact(struct carddav_context * context,
-                                 const char * name,
-                                 const char * phonenumber)
+static void upload_phone_contact(struct carddav_context *context,
+                                 const char *name,
+                                 const char *phonenumber)
 {
 	re_snprintf(context->buf_a,
 	            context->buf_len,
@@ -386,9 +390,9 @@ static void upload_phone_contact(struct carddav_context * context,
 }
 
 
-static void upload_sip_contact(struct carddav_context * context,
-                               const char * name,
-                               const char * uri)
+static void upload_sip_contact(struct carddav_context *context,
+                               const char *name,
+                               const char *uri)
 {
 /*
   Good note:
@@ -409,7 +413,7 @@ static void upload_sip_contact(struct carddav_context * context,
 }
 
 
-static void extract_name(char name[64], const char * con_str)
+static void extract_name(char name[64], const char *con_str)
 {
 	const char * pos = con_str + 1;
 	const char * end = strchr(pos, '"');
@@ -418,8 +422,8 @@ static void extract_name(char name[64], const char * con_str)
 }
 
 
-static void upload_unique(struct carddav_context * context,
-                          struct list * contacts_org,
+static void upload_unique(struct carddav_context *context,
+                          struct list *contacts_org,
                           bool just_restore)
 {
 	struct contacts *contacts = context->contacts;
@@ -427,12 +431,12 @@ static void upload_unique(struct carddav_context * context,
 	for (struct le * cur = list_head(contacts_org);
 	    cur;
 	    cur = cur->next) {
-		struct contact * con = (struct contact*)cur->data;
-		const char * con_str = contact_str(con);
+		struct contact *con = (struct contact*)cur->data;
+		const char *con_str = contact_str(con);
 		struct pl pl;
 
 		if (!just_restore) {
-			const char * uri = contact_uri(con);
+			const char *uri = contact_uri(con);
 
 			if (strstr(con_str, CARDDAV))
 				continue;
@@ -443,18 +447,18 @@ static void upload_unique(struct carddav_context * context,
 				continue;
 			}
 
-			struct contact  * dup = contact_find(contacts, uri);
+			struct contact *dup = contact_find(contacts, uri);
 			if (dup)
 				continue;
 
-			const char * end = strchr(uri, '@');
+			const char *end = strchr(uri, '@');
 			if (!end) {
 				warning("carddav: Contact URI %s, no @\n",
 				        uri);
 				continue;
 			}
 
-			const char * pos = uri;
+			const char *pos = uri;
 			if (strncmp(pos, "sip:", 4)) {
 				warning("carddav: Contact URI %s, no sip:\n",
 				        uri);
@@ -522,7 +526,7 @@ static void upload_unique(struct carddav_context * context,
 }
 
 
-static int carddav_sync_instance(struct carddav_context * context)
+static int carddav_sync_instance(struct carddav_context *context)
 {
 	info("carddav: using URL: %s\n", context->url);
 	info("carddav: using user: %s\n", context->user);
@@ -606,19 +610,19 @@ static int carddav_sync(void)
 
 	context.buf_a = mem_zalloc(context.buf_len, NULL);
 	if (!context.buf_a) {
-		warning("carddav: Unable to allocate carddav buffer 1.\n");
+		warning("carddav: Unable to allocate carddav buffer A.\n");
 		e = ENOMEM;
 		goto cleanup;
 	}
 	context.buf_b = mem_zalloc(context.buf_len, NULL);
 	if (!context.buf_b) {
-		warning("carddav: Unable to allocate carddav buffer 2.\n");
+		warning("carddav: Unable to allocate carddav buffer B.\n");
 		mem_deref(context.buf_a);
 		e = ENOMEM;
 		goto cleanup;
 	}
 
-	struct list * contacts_list = contact_list(context.contacts);
+	struct list *contacts_list = contact_list(context.contacts);
 	struct list contacts_list_org;
 	list_init(&contacts_list_org);
 	move_contacts(contacts_list,
