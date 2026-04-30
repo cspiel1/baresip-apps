@@ -31,7 +31,11 @@
   carddav_user          myusername:mypassword
   carddav_url           https://my.mextcloud.org/remote.php/dav/addressbooks/\
 users/myuser/myshareuuid/
-  carddav_buf           32768
+  carddav_buf           524288
+  carddav_extras        1
+  carddav_1_user        myusername:mypassword
+  carddav_1_url         https://my.mextcloud2.org/remote.php/dav/addressbooks/\
+
  \endverbatim
  */
 
