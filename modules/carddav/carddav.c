@@ -27,22 +27,24 @@
  *
  * Example config:
  \verbatim
-  carddav_gateway       sip.example.co.uk
-  carddav_user          myusername:mypassword
-  carddav_url           https://my.mextcloud.org/remote.php/dav/addressbooks/\
+  carddav_gateway      sip.example.co.uk
+  carddav_user         myusername:mypassword
+  carddav_url          https://my.nextcloud.org/remote.php/dav/addressbooks/\
 users/myuser/myshareuuid/
-  carddav_buf           524288
-  carddav_at_boot       true
-  carddav_upload        true
-  carddav_extras        1
-  carddav_1_user        myusername:mypassword
-  carddav_1_url         https://my.mextcloud2.org/remote.php/dav/addressbooks/\
+  carddav_buf          524288
+  carddav_at_boot      true
+  carddav_upload       true
+  carddav_extras       1
+  carddav_1_user       myusername:mypassword
+  carddav_1_url        https://my.nextcloud2.org/remote.php/dav/addressbooks/\
 
  \endverbatim
  */
 
 
 #define PTRDIFF(a,b) ((uintptr_t)a - (uintptr_t)b)
+#define WILD "!-\\~ "
+#define CARDDAV "(CardDAV)"
 
 
 struct carddav_context
@@ -58,47 +60,6 @@ struct carddav_context
 	unsigned count;
 	bool upload;
 };
-
-#define CARDDAV "(CardDAV)"
-
-
-static int get_vcard_attr(const char *cardstart,
-                          uintptr_t cardend,
-                          const char *attr,
-                          char result[512])
-{
-	char attr2[32];
-	unsigned attr_len = re_snprintf(attr2,
-	                                sizeof(attr2),
-	                                "%s:", attr);
-
-	char * found = memmem(cardstart,
-	                      cardend-(uintptr_t)cardstart,
-	                      attr2, attr_len);
-
-	if (!found) {
-		attr2[attr_len-1]=';';
-
-		found = memmem(cardstart,
-		               cardend-(uintptr_t)cardstart,
-		               attr2, attr_len);
-
-		if (!found)
-			return ENOENT;
-	}
-
-	found+=attr_len;
-
-	char * attrend = memmem(found,
-	                        cardend-(uintptr_t)cardstart,
-	                       "&#13;", 4);
-
-	if (!attrend)
-		return ENOENT;
-
-	str_ncpy(result, found, (uintptr_t)attrend-(uintptr_t)found+1);
-	return 0;
-}
 
 
 static struct contact *in_contacts(struct contacts *contacts,
@@ -121,95 +82,10 @@ static struct contact *in_contacts(struct contacts *contacts,
 }
 
 
-static char *last_column(char *s)
+static int add_addr(struct carddav_context *context,
+                    char addr[1024])
+
 {
-	unsigned len = strlen(s);
-	while (len) {
-		char c = s[--len];
-		if (c == ';' || c == ':')
-			return s + len;
-	}
-
-	return NULL;
-}
-
-
-static int process_card(const char *cardstart,
-                         uintptr_t cardend,
-                         struct carddav_context *context)
-{
-	char name[512] = {0};
-	char tel[512] = {0};
-	char addr[1024] = {0};
-	int e = get_vcard_attr(cardstart, cardend, "\nFN", name);
-	if (e)
-		return e;
-
-	e = get_vcard_attr(cardstart, cardend, "\nIMPP", tel);
-	if (!e) {
-		char * pos = last_column(tel);
-		if (!pos)
-			return EINVAL;
-		pos -= 3;
-		if (pos < tel) {
-			debug("carddav: Broken IMPP for %s\n", name);
-			return EINVAL;
-		}
-
-		if (!strncmp(pos, "SIP:", 4) || !strncmp(pos, "sip:", 4))
-		{
-			pos[0]=tolower(pos[0]);
-			pos[1]=tolower(pos[1]);
-			pos[2]=tolower(pos[2]);
-			debug("carddav: SIP IMPP <%s>\n", pos);
-			re_snprintf(addr,
-				   sizeof(addr),
-				   "\"%s "CARDDAV"\" <%s>",
-				   name, pos);
-		}
-		else debug("carddav: Non-SIP IMPP %s\n", tel);
-	}
-
-	if (!addr[0]) {
-		e = get_vcard_attr(cardstart, cardend, "\nTEL", tel);
-		if (e)
-			return e;
-		const char * pos = last_column(tel);
-		if (!pos)
-			return EINVAL;
-		unsigned len = re_snprintf(addr,
-		                           sizeof(addr),
-		                           "\"%s "CARDDAV"\" <sip:",
-		                           name);
-		unsigned hascode=0;
-
-		while (*pos) {
-			char c = *pos++;
-
-			if ( c == '+') {
-				addr[len++]='0';
-				++hascode;
-			}
-			else if (isdigit(c)) {
-				if (hascode==1) {
-					addr[len++]='0';
-					hascode=0;
-				}
-				else if (hascode>2) {
-					len-=(hascode-2);
-					hascode=0;
-				}
-				addr[len++]=c;
-			}
-		}
-
-		re_snprintf(addr+len, sizeof(addr)-len,
-		            "@%s>", context->gateway);
-	}
-
-	if (!addr[0])
-		return ENOENT;
-
 	if (in_contacts(context->contacts, addr)) {
 		info("carddav: Duplicate SIP %s\n", addr);
 		return 0;
@@ -219,12 +95,181 @@ static int process_card(const char *cardstart,
 	pl_set_str(&pl, addr);
 
 	info("carddav: Adding %s\n", addr);
-	e = contact_add(context->contacts, NULL, &pl);
+	int e = contact_add(context->contacts, NULL, &pl);
 	if (!e)
 		context->count++;
 	else
 		warning("carddav: Failed to add contact.\n");
 	return e;
+}
+
+
+static void rstrip(struct pl * pl)
+{
+	/* There may well be escaped carriage return to remove.*/
+	const char * cr = pl_strstr(pl, "&#13");
+	if (cr)
+		pl->l = PTRDIFF(cr, pl->p);
+
+}
+
+
+static int process_tel_card(const char *cardpos,
+                            uintptr_t cardend,
+                            struct carddav_context *context,
+                            struct pl * name,
+                            char * addr, size_t addr_len)
+{
+	unsigned telcount = 0;
+	int e = 0;
+
+	while ((uintptr_t)cardpos < cardend) {
+		struct pl telline = {0};
+		e = re_regex(cardpos,
+		             PTRDIFF(cardend, cardpos),
+		             "\nTEL["WILD"]+\n",
+		             &telline);
+
+		struct pl pn = {0}, tel = PL("");
+
+		if (e) {
+			if (e == ENOENT)
+				e = 0;
+			goto out;
+		}
+
+		rstrip(&telline);
+
+		if (telline.p[0] == ';')
+			re_regex(telline.p, telline.l, "TYPE=[a-zA-Z]+", &tel);
+		else if (telline.p[0] != ':') {
+			/* Not a TEL entry */
+			cardpos = telline.p + telline.l;
+			continue;
+		}
+		e = re_regex(telline.p, telline.l, ":[+0-9\\- ]+", &pn);
+
+		if (e) {
+			warning("carddav: No number found in TEL entry.\n");
+			cardpos = telline.p + telline.l;
+			continue;
+		}
+
+		int len = re_snprintf(addr,
+		                      addr_len,
+		                      "\"%r%s%r%s "CARDDAV"\" <sip:",
+		                      name,
+		                      (tel.l)?" (Tel:":"",
+		                      &tel,
+		                      (tel.l)?")":"");
+
+		if (len <= 0) {
+			warning("carddav: Failed to write out addr.\n");
+			cardpos = telline.p + telline.l;
+			continue;
+		}
+
+		const char * pos = pn.p;
+		const char * end = pn.p + pn.l;
+
+		/* Plus are used instead of international code 00 often, but
+		 * SIP phone numbers are numeric only.
+		 */
+		if (*pos == '+') {
+			addr[len++]='0';
+			addr[len++]='0';
+			++pos;
+			while (*pos == '+')
+				++pos;
+		}
+
+		while (pos < end) {
+			char c = *pos++;
+
+			if (isdigit(c))
+				addr[len++]=c;
+		}
+
+		re_snprintf(addr+len, addr_len - len,
+		            "@%s>", context->gateway);
+
+		e = add_addr(context, addr);
+		if (e)
+			goto out;
+
+		++telcount;
+
+		cardpos = telline.p + telline.l;
+	}
+
+out:
+	if (telcount)
+		debug("carddav: found %u tel numbers.\n", telcount);
+	else
+		debug("carddav: No tel numbers.\n");
+
+	return e;
+}
+
+
+static int process_card(const char *cardstart,
+                         uintptr_t cardend,
+                         struct carddav_context *context)
+{
+	char addr[1024] = {0};
+
+	struct pl name;
+
+	int e = re_regex(cardstart,
+	                 PTRDIFF(cardend, cardstart),
+	                 "\nFN[:;]+["WILD"]+\n",
+	                 NULL, &name);
+	if (e) {
+		warning("carddav: No fullname : %s\n", strerror(e));
+		return e;
+	}
+
+	rstrip(&name);
+
+	debug("carddav: Found: %r\n", &name);
+
+	struct pl impp;
+
+	/* RE's regex is only basic. A block will continue while characters
+	match. So the end must be non matching charcters. */
+	e = re_regex(cardstart,
+	             PTRDIFF(cardend, cardstart),
+	             "\nIMPP[:;]+["WILD"]+", NULL, &impp);
+
+	if (!e) {
+		struct pl impphost;
+		struct pl imppuser;
+
+		e = re_regex(impp.p, impp.l, "TYPE=SIP");
+		if (!e)
+			e = re_regex(impp.p, impp.l,
+			             ":[A-Za-z0-9]+@[a-z0-9\\-.]+",
+			             &imppuser, &impphost);
+		if (!e) {
+			re_snprintf(addr,
+			            sizeof(addr),
+			            "\"%r "CARDDAV"\" <sip:%r@%r>",
+			            &name, &imppuser, &impphost);
+			debug("carddav: IMPP SIP found\n");
+
+			e = add_addr(context, addr);
+			if (e)
+				return e;
+		}
+	}
+
+	if (!addr[0]) {
+		return process_tel_card(cardstart, cardend,
+		                        context, &name,
+		                        addr, sizeof(addr));
+	}
+
+	return 0;
 }
 
 
@@ -262,6 +307,8 @@ static size_t writefunc(const void *ptr,
 		return total;
 	}
 
+	pos += 11;
+
 	char *end = context->buf_a + context->buf_used;
 	char *cardend = memmem(pos,
 	                       PTRDIFF(end, pos),
@@ -289,6 +336,7 @@ static size_t writefunc(const void *ptr,
 		             11);
 		if (!pos)
 			break;
+
 		cardend = memmem(pos,
 		                 PTRDIFF(end, pos),
 		                 "END:VCARD",
@@ -387,7 +435,7 @@ static int upload_phone_contact(struct carddav_context *context,
 	            "BEGIN:VCARD\n"
 	            "VERSION:3.0\n"
 	            "FN:%s\n"
-	            "TEL;TYPE=cell:%s\n"
+	            "TEL:%s\n"
 	            "END:VCARD\n",
 	            name, phonenumber);
 
@@ -681,7 +729,7 @@ static int carddav_sync(void)
 		carddav_sync_instance(&context);
 	}
 
-	// Restore main carddav fot any uploads.
+	/* Restore main carddav for any uploads. */
 	conf_get_str(conf_cur(), "carddav_user", user, sizeof(user));
 	conf_get_str(conf_cur(), "carddav_url", url, sizeof(url));
 
