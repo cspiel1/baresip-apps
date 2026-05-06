@@ -668,6 +668,10 @@ static int carddav_sync(void)
 		carddav_sync_instance(&context);
 	}
 
+	// Restore main carddav fot any uploads.
+	conf_get_str(conf_cur(), "carddav_user", user, sizeof(user));
+	conf_get_str(conf_cur(), "carddav_url", url, sizeof(url));
+
 	restore_and_upload_unique(&context, &contacts_list_org, false);
 	list_flush(&contacts_list_org);
 	goto cleanup;
