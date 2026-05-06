@@ -54,6 +54,7 @@ struct carddav_context
 	const char *user;
 	const char *url;
 	unsigned count;
+	bool upload;
 };
 
 #define CARDDAV "(CardDAV)"
@@ -422,9 +423,9 @@ static void extract_name(char name[64], const char *con_str)
 }
 
 
-static void upload_unique(struct carddav_context *context,
-                          struct list *contacts_org,
-                          bool just_restore)
+static void restore_and_upload_unique(struct carddav_context *context,
+                                      struct list *contacts_org,
+                                      bool just_restore)
 {
 	struct contacts *contacts = context->contacts;
 
@@ -435,7 +436,7 @@ static void upload_unique(struct carddav_context *context,
 		const char *con_str = contact_str(con);
 		struct pl pl;
 
-		if (!just_restore) {
+		if (!just_restore && context->upload) {
 			const char *uri = contact_uri(con);
 
 			if (strstr(con_str, CARDDAV))
@@ -592,6 +593,8 @@ static int carddav_sync(void)
 		return EINVAL;
 	}
 
+	conf_get_bool(conf_cur(), "carddav_upload", &context.upload);
+
 	conf_get_u32(conf_cur(), "carddav_buf", &context.buf_len);
 	if (!context.buf_used)
 		context.buf_len = 1024 * 128;
@@ -665,13 +668,13 @@ static int carddav_sync(void)
 		carddav_sync_instance(&context);
 	}
 
-	upload_unique(&context, &contacts_list_org, false);
+	restore_and_upload_unique(&context, &contacts_list_org, false);
 	list_flush(&contacts_list_org);
 	goto cleanup;
 
 bad:
 	move_contacts(contacts_list, NULL, context.contacts);
-	upload_unique(&context, &contacts_list_org, true);
+	restore_and_upload_unique(&context, &contacts_list_org, true);
 	list_flush(&contacts_list_org);
 
 cleanup:
