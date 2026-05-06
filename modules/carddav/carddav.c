@@ -592,7 +592,7 @@ static int carddav_sync(void)
 		return EINVAL;
 	}
 
-	conf_get_u32(conf_cur(), "carddav_url", &context.buf_len);
+	conf_get_u32(conf_cur(), "carddav_buf", &context.buf_len);
 	if (!context.buf_used)
 		context.buf_len = 1024 * 128;
 
