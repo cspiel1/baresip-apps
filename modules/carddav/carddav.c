@@ -32,6 +32,8 @@
   carddav_url           https://my.mextcloud.org/remote.php/dav/addressbooks/\
 users/myuser/myshareuuid/
   carddav_buf           524288
+  carddav_at_boot       true
+  carddav_upload        true
   carddav_extras        1
   carddav_1_user        myusername:mypassword
   carddav_1_url         https://my.mextcloud2.org/remote.php/dav/addressbooks/\
