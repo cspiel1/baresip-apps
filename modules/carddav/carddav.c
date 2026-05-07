@@ -331,7 +331,7 @@ static void move_contacts(struct list *contacts_a,
 static int upload(struct carddav_context *context, const char *name)
 {
 	CURL *curl = curl_easy_init();
-	if (curl)
+	if (!curl)
 		return EINVAL;
 	unsigned len = re_snprintf(context->buf_b,
 	                           context->buf_len,
@@ -410,9 +410,9 @@ static int upload_sip_contact(struct carddav_context *context,
 	            "BEGIN:VCARD\n"
 	            "VERSION:3.0\n"
 	            "FN:%s\n"
-	            "IMPP;TYPE=SIP:%s\n"
+	            "IMPP;TYPE=%s\n"
 	            "END:VCARD\n",
-	            name, uri + 4);
+	            name, uri);
 
 	return upload(context, name);
 }
@@ -502,14 +502,19 @@ static void restore_and_upload_unique(struct carddav_context *context,
 			}
 
 			if (!just_restore && context->upload) {
-				debug("carddav: Push Name \"%s\" "
+				debug("carddav: Uploading \"%s\" "
 				      "Phone number %s\n",
 				      name,  pn);
 				e = upload_phone_contact(context, name, pn);
 			}
 		}
-		else if (!just_restore && context->upload) {
-			e = upload_sip_contact(context, name, uri);
+		else {
+			if (!just_restore && context->upload) {
+				debug("carddav: Uploading \"%s\" "
+				      "Non-number %s\n",
+				      name,  uri);
+				e = upload_sip_contact(context, name, uri);
+			}
 		}
 
 		if (!e) {
@@ -601,6 +606,7 @@ static int carddav_sync(void)
 	}
 
 	conf_get_bool(conf_cur(), "carddav_upload", &context.upload);
+	info("carddav: upload : %s\n", (context.upload)?"true":"false");
 
 	conf_get_u32(conf_cur(), "carddav_buf", &context.buf_len);
 	if (!context.buf_used)
