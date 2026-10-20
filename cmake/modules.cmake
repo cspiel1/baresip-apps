@@ -20,6 +20,7 @@ set(MODULES
   rtsp
   ebuacip
   calltimer
+  aurec
 )
 
 if(FVAD_FOUND)
