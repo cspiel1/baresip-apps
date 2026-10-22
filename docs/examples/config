@@ -30,3 +30,9 @@
 #multicast_listener	224.0.2.21:50000
 #multicast_listener	224.0.2.21:50002
 #multicast_listener	[FF2E::42]:50004
+
+# aurec - audio recording of emergency events
+# aurec_pre      5000                   # pre-buffer latency in [ms]
+# aurec_post     5000                   # post-buffer latency in [ms]
+# aurec_num      3                      # number of recorded events
+# aurec_srate    48000                  # sample rate in [Hz]

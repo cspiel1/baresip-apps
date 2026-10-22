@@ -13,6 +13,7 @@
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
+#include <stdint.h>
 
 
 struct aurec {
@@ -20,16 +21,40 @@ struct aurec {
 	struct tmr tmr;
 	mtx_t *lock;
 	struct call *call;
+
+	uint8_t ch;
+	enum aufmt fmt;
+	uint32_t srate;
+	size_t pre_size;
+	size_t buf_size;
+	struct aubuf *buf;
+	struct ausrc_st *src;
 };
 
 static struct aurec aurec;
 
 static void timeout(void *arg);
+static int stop_ausrc(void);
 
 
 static int aurec_init(void )
 {
 	int err = 0;
+	uint32_t pre_ms = 5000;
+	uint32_t post_ms = pre_ms;
+	size_t sz = aufmt_sample_size(AUFMT_S16LE);
+
+	aurec.ch = 1;
+	aurec.fmt = AUFMT_S16LE;
+	aurec.srate = 16000;
+	(void)conf_get_u32(conf_cur(), "aurec_srate", &aurec.srate);
+	(void)conf_get_u32(conf_cur(), "aurec_pre", &pre_ms);
+	(void)conf_get_u32(conf_cur(), "aurec_post", &post_ms);
+	aurec.pre_size = sz * au_calc_nsamp(aurec.srate, aurec.ch, pre_ms);
+	aurec.buf_size = aurec.pre_size +
+			 sz * au_calc_nsamp(aurec.srate, aurec.ch, post_ms);
+
+	aubuf_alloc(&aurec.buf, aurec.pre_size, aurec.buf_size);
 
 	err = mutex_alloc(&aurec.lock);
 	if (err)
@@ -46,6 +71,68 @@ static void aurec_close(void)
 {
 	tmr_cancel(&aurec.tmr);
 	mem_deref(aurec.lock);
+	stop_ausrc();
+	mem_deref(aurec.buf);
+}
+
+
+static void ausrc_read_handler(struct auframe *af, void *arg)
+{
+	(void)arg;
+
+	if (!aurec.buf)
+		return;
+
+	if (af->fmt != aurec.fmt) {
+		warning("aurec: ausrc format mismatch\n");
+		return;
+	}
+
+	aubuf_write_auframe(aurec.buf, af);
+
+	static uint32_t logcnt = 0;
+	if (++logcnt % 100 == 0) {
+		debug("aurec: buffered %zu ms\n",
+		      aubuf_cur_size(aurec.buf) * 1000 /
+		      (aufmt_sample_size(aurec.fmt) * aurec.ch * aurec.srate));
+	}
+}
+
+
+static int start_ausrc(void)
+{
+	struct config *cfg = conf_config();
+	if (!cfg)
+		return EINVAL;
+
+	if (!aurec.src) {
+		const char *mod = cfg->audio.src_mod;
+		const char *dev = cfg->audio.src_dev;
+		struct ausrc_prm prm = {
+			.srate = aurec.srate,
+			.ch    = aurec.ch,
+			.ptime = 20,
+			.fmt   = aurec.fmt
+		};
+
+		int err = ausrc_alloc(&aurec.src, baresip_ausrcl(), mod, &prm,
+				      dev, ausrc_read_handler, NULL, NULL);
+		if (err) {
+			warning("aurec: could not open ausrc %s (%s)\n",
+				mod, dev);
+			return ENOENT;
+		}
+	}
+
+	return 0;
+}
+
+
+static int stop_ausrc(void)
+{
+	mem_deref(aurec.src);
+	aubuf_flush(aurec.buf);
+	return 0;
 }
 
 
@@ -176,9 +263,39 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 }
 
 
+static int cmd_enable(struct re_printf *pf, void *arg)
+{
+	const struct cmd_arg *carg = arg;
+	const char *prm = carg->prm;
+
+	const char *usage = "usage: /aurec_enable <bool>\n";
+
+	if (!str_isset(prm)) {
+		(void)re_hprintf(pf, "%s", usage);
+		return EINVAL;
+	}
+
+	bool enable = false;
+
+	int err = str_bool(&enable, prm);
+	if (err)
+		return err;
+
+	if (enable) {
+		err = start_ausrc();
+	}
+	else {
+		(void) stop_ausrc();
+	}
+
+	return err;
+}
+
+
 static const struct cmd cmdv[] = {
-{"aurec"       ,0,    CMD_PRM, "Start audio recording",    cmd_aurec},
-{"aurec_play"  ,0,    CMD_PRM, "Play audio recording",    cmd_auplay},
+{"aurec"         ,0,    CMD_PRM, "Start audio recording",    cmd_aurec},
+{"aurec_play"    ,0,    CMD_PRM, "Play audio recording",    cmd_auplay},
+{"aurec_enable"  ,0,    CMD_PRM, "Enable/Disable audio source", cmd_enable},
 };
 
 
