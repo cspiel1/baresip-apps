@@ -92,6 +92,8 @@ static int aurec_init(void )
 	pre_size = sz * au_calc_nsamp(aurec.srcprm.srate, aurec.srcprm.ch,
 				      aurec.pre_ms);
 
+	debug("aurec: aubuf max size %zu bytes for %u ms\n",
+	      pre_size, aurec.pre_ms);
 	err |= aubuf_alloc(&aurec.buf, 0, pre_size);
 	tmr_init(&aurec.tmr);
 	return err;
@@ -125,9 +127,12 @@ static void ausrc_read_handler(struct auframe *af, void *arg)
 	re_atomic_rlx_set(&aurec.ts, af->timestamp);
 
 	static uint32_t logcnt = 0;
-	if (++logcnt % 100 == 0) {
-		debug("aurec: buffered %zu ms\n",
-		      aubuf_cur_size(aurec.buf) / auframe_size(af));
+	if (log_level_get() == LEVEL_DEBUG && ++logcnt % 100 == 0) {
+		size_t sz = aufmt_sample_size(aurec.srcprm.fmt);
+		size_t len = aubuf_cur_size(aurec.buf);
+		size_t psize;
+		psize = sz * aurec.srcprm.srate * aurec.srcprm.ch / 1000;
+		debug("aurec: buffered %zu ms (%zu)\n", len / psize, psize);
 	}
 }
 
@@ -282,8 +287,8 @@ static void packet_destructor(void *arg)
 
 static size_t max_packet_size(void)
 {
-	/* 8 byte reserve for safety */
-	return aurec.bitrate * PTIME / 8000 + 8;
+	/* 16 byte reserve for safety */
+	return aurec.bitrate * PTIME / 8000 + 16;
 }
 
 
@@ -330,6 +335,10 @@ static void record_frame(void *arg)
 	size_t len = mbuf_get_space(pkt->mb);
 	err = aurec.ac->ench(aurec.enc, &marker, mbuf_buf(pkt->mb), &len,
 			     aurec.srcprm.fmt, aurec.af.sampv, aurec.af.sampc);
+
+	pkt->mb->pos = 0;
+	pkt->mb->end = len;
+
 	if (err) {
 		warning("aurec: opus encode failed (%m)\n", err);
 		mem_deref(pkt);
@@ -346,6 +355,7 @@ static void stop_recording(void *arg)
 {
 	(void) arg;
 
+	info("aurec: stop recording\n");
 	tmr_cancel(&aurec.tmr);
 }
 
@@ -458,6 +468,7 @@ static void event_handler(enum bevent_ev ev, struct bevent *event, void *arg)
 
 	switch (ev) {
 		case BEVENT_END_OF_FILE:
+			info("aurec: switch to live %s\n", call_id(call));
 			audio_set_source(call_audio(call), NULL, NULL);
 			call_update_media(call);
 			module_event("aurec", "switch_to_live", ua, call,
@@ -531,6 +542,17 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 		return EINVAL;
 	}
 
+	char *uuid_str;
+	err = pl_strdup(&uuid_str, &uuid);
+	if (err)
+		goto out;
+
+	if (!find_recording(uuid_str)) {
+		re_hprintf(pf, "no recording found for uuid=%s\n", uuid_str);
+		err = EINVAL;
+		goto out;
+	}
+
 	if (!aurec.src) {
 		(void)re_hprintf(pf, "aurec: not enabled\n");
 		return EINVAL;
@@ -585,11 +607,11 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 
 	re_hprintf(pf, "call id: %s\n", call_id(call));
 
-	/* switch to buffer */
-	audio_set_source(call_audio(call), "aufile",
-			 "/usr/share/baresip/ring.wav");
+	/* switch to recording */
+	audio_set_source(call_audio(call), "aurec", uuid_str);
 
  out:
+	mem_deref(uuid_str);
 	mem_deref(uri);
 
 	return err;
@@ -652,6 +674,7 @@ static int module_close(void)
 {
 	cmd_unregister(baresip_commands(), cmdv);
 	bevent_unregister(event_handler);
+	mem_deref(ausrc);
 	aurec_close();
 	return 0;
 }

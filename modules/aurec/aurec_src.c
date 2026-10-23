@@ -13,7 +13,7 @@
 struct ausrc_st {
 	struct tmr tmr;
 	struct ausrc_prm prm;           /**< Audio src parameter             */
-	char uuid;                      /**< UUID set by device parameter    */
+	char *uuid;                     /**< UUID set by device parameter    */
 	const struct aucodec *ac;       /**< Audio codec of recordings       */
 	struct audec_state *dec;        /**< Audio decoder state             */
 
@@ -37,6 +37,8 @@ static void destructor(void *arg)
 	}
 
 	tmr_cancel(&st->tmr);
+	mem_deref(st->dec);
+	mem_deref(st->uuid);
 }
 
 
@@ -48,13 +50,14 @@ static int decode_packet(struct ausrc_st *st,
 
 	size_t len = mbuf_get_left(pkt->mb);
 	bool marker = false;
-	int err = st->ac->dech(st->dec, st->prm.fmt, af->sampv, &af->sampc,
+	int err = st->ac->dech(st->dec, af->fmt, af->sampv, &af->sampc,
 				 marker, mbuf_buf(pkt->mb), len);
 	if (err) {
 		warning("aurec: opus decode failed (%m)\n", err);
 		return err;
 	}
 
+	af->timestamp = pkt->ts;
 	return 0;
 }
 
@@ -70,12 +73,15 @@ static int src_thread(void *arg)
 	if (!sampv)
 		return ENOMEM;
 
-	const struct aurec_packet *pkt = aurec_first_packet(&st->uuid);
+	const struct aurec_packet *pkt = aurec_first_packet(st->uuid);
 	if (!pkt) {
-		warning("aurec: no packet found for uuid=%c\n", st->uuid);
+		warning("aurec: no packet found for uuid=%s\n", st->uuid);
 		goto out;
 	}
 
+	uint64_t ts_max = aurec_ts_max(st->uuid);
+	info("aurec: stream recording uuid=%s from %"PRIu64" to %"PRIu64"\n",
+	     st->uuid, pkt->ts, ts_max);
 	while (re_atomic_rlx(&st->run)) {
 		struct auframe af;
 
@@ -84,9 +90,8 @@ static int src_thread(void *arg)
 		if (ts > now)
 			continue;
 
-		auframe_init(&af, AUFMT_S16LE, sampv, st->sampc,
+		auframe_init(&af, st->prm.fmt, sampv, st->sampc,
 		             st->prm.srate, st->prm.ch);
-
 		int err = decode_packet(st, pkt, &af);
 		if (err)
 			break;
@@ -96,7 +101,7 @@ static int src_thread(void *arg)
 		ts += st->prm.ptime;
 
 		pkt = aurec_next_packet(pkt);
-		if (!pkt)
+		if (!pkt || pkt->ts > ts_max)
 			break;
 	}
 
@@ -131,21 +136,24 @@ int aurec_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 		    ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
 	struct ausrc_st *st;
-	struct ausrc_prm sprm;
 	int err;
 
 	if (!stp || !as || !prm || !rh)
 		return EINVAL;
 
-	aurec_get_srcprm(&sprm);
 	st = mem_zalloc(sizeof(*st), destructor);
 	if (!st)
 		return ENOMEM;
 
+	aurec_get_srcprm(&st->prm);
 	st->rh    = rh;
 	st->errh  = errh;
 	st->arg   = arg;
 	st->ac    = aurec_codec();
+	err = str_dup(&st->uuid, dev);
+	if (err)
+		goto out;
+
 	const struct aucodec *ac = st->ac;
 	if (!ac)
 		return ENOENT;
@@ -159,14 +167,13 @@ int aurec_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	}
 
 	/* return real format to caller */
-	*prm = sprm;
-	st->sampc  = prm->srate * prm->ch * sprm.ptime / 1000;
+	*prm = st->prm;
+	st->sampc  = prm->srate * prm->ch * prm->ptime / 1000;
 
-	info("aurec_src: %s: %u Hz, %d channels, %s\n",
-	     dev, sprm.srate, sprm.ch, aufmt_name(sprm.fmt));
-	info("aurec_src: audio ptime=%u sampc=%zu\n", sprm.ptime, st->sampc);
+	info("aurec_src: audio %u/%u sampc=%zu\n", st->prm.srate,
+	     st->prm.ch, st->sampc);
 
-	tmr_start(&st->tmr, sprm.ptime, timeout, st);
+	tmr_start(&st->tmr, st->prm.ptime, timeout, st);
 
 	re_atomic_rlx_set(&st->run, true);
 	st->started = true;
