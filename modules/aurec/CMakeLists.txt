@@ -3,7 +3,7 @@ project(aurec)
 list(APPEND MODULES_DETECTED ${PROJECT_NAME})
 set(MODULES_DETECTED ${MODULES_DETECTED} PARENT_SCOPE)
 
-set(SRCS aurec.c)
+set(SRCS aurec.c aurec_src.c)
 
 if(STATIC)
     add_library(${PROJECT_NAME} OBJECT ${SRCS})

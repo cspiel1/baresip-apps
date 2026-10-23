@@ -402,6 +402,21 @@ struct aurec_packet *aurec_next_packet(const struct aurec_packet *pkt)
 }
 
 
+void aurec_get_srcprm(struct ausrc_prm *prm)
+{
+	if (!prm)
+		return;
+
+	*prm = aurec.srcprm;
+}
+
+
+const struct aucodec *aurec_codec(void)
+{
+	return aurec.ac;
+}
+
+
 static int add_recording(const char *uuid)
 {
 	struct aurec_recording *rec;
@@ -617,6 +632,8 @@ static const struct cmd cmdv[] = {
 };
 
 
+static struct ausrc *ausrc;
+
 static int module_init(void)
 {
 	info("aurec: module loaded\n");
@@ -624,6 +641,9 @@ static int module_init(void)
 	int err;
 	err  = bevent_register(event_handler, NULL);
 	err |= cmd_register(baresip_commands(), cmdv, RE_ARRAY_SIZE(cmdv));
+	err |= ausrc_register(&ausrc, baresip_ausrcl(), "aurec",
+			      aurec_src_alloc);
+
 	return err;
 }
 
