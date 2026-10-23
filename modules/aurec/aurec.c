@@ -3,10 +3,10 @@
  *
  * - Continously reads audio from the microphone and buffers a configurable
  *   amount of pre-emergency audio.
- * - When an emergency event is reported with command `aurec <uuid>`, then
- *   pre-emergency buffer an configurable post-emergency audio is opus encoded
- *   and stored in an mbuf.
- * - The recorded mbuf can be streamed on demand to a SIP call. This module
+ * - When an emergency event is reported with command `aurec <uuid>`, then a
+ *   configurable time of the pre-buffered audio stream is opus encoded and
+ *   stored in a packet list.
+ * - The packet list can be streamed on demand to a SIP call. This module
  *   implements an ausrc that reads the recorded data, decodes and passes this
  *   to the SIP call. There it has to be encoded again with the codec used in
  *   the call.
@@ -18,6 +18,7 @@
 #include <rem.h>
 #include <baresip.h>
 #include <stdint.h>
+#include "aurec.h"
 
 enum {
 	MAX_PACKETS = 1500,         /**< 30 seconds maximum  */
@@ -28,22 +29,21 @@ enum {
 struct aurec {
 
 	/* config */
-	uint8_t ch;
-	enum aufmt fmt;
-	uint32_t srate;
+	struct ausrc_prm srcprm;
 	uint32_t bitrate;
 	uint32_t pre_ms;
 	uint32_t post_ms;
 	char *fmtp;
 
-	/* buffering */
-	struct aubuf *buf;
+	/* buffering (thread: ausrc) */
 	struct ausrc_st *src;
-	struct auframe af;
+	struct aubuf *buf;
+	RE_ATOMIC uint64_t ts;     /**< timestamp of nearly now */
 
 	/* recording */
 	const struct aucodec *ac;
 	struct auenc_state *enc;
+	struct auframe af;
 	struct list recordings;
 	struct list packets;
 	struct tmr tmr;
@@ -53,24 +53,20 @@ struct aurec {
 	struct call *call;
 };
 
-struct aurec_packet {
-	struct le le;
-
-	uint64_t ts;       /**< Timestamp in RTP clock units */
-	struct mbuf *mb;   /**< Opus encoded packet */
-};
-
 struct aurec_recording {
 	struct le le;
 
 	char *uuid;     /**< UUID of the recording */
-	uint64_t ts;    /**< Timestamp of first packet */
+	uint64_t ts;    /**< Timestamp nearly at allocation */
 };
 
 static struct aurec aurec = {
-	.ch = 1,
-	.fmt = AUFMT_S16LE,
-	.srate = 48000,
+	.srcprm = {
+		.srate = 48000,
+		.ch    = 1,
+		.ptime = PTIME,
+		.fmt   = AUFMT_S16LE
+	},
 	.bitrate = 20000,
 	.pre_ms = 5000,
 	.post_ms = 5000,
@@ -82,21 +78,21 @@ static int stop_ausrc(void);
 
 static int aurec_init(void )
 {
-	size_t sz = aufmt_sample_size(aurec.fmt);
+	size_t sz = aufmt_sample_size(aurec.srcprm.fmt);
+	size_t pre_size;
 	struct pl fmtp = PL_INIT;
 	int err;
 
-	(void)conf_get_u32(conf_cur(), "aurec_srate", &aurec.srate);
+	(void)conf_get_u32(conf_cur(), "aurec_srate", &aurec.srcprm.srate);
 	(void)conf_get_u32(conf_cur(), "opus_bitrate", &aurec.bitrate);
 	(void)conf_get(conf_cur(), "opus_fmtp", &fmtp);
 	(void)conf_get_u32(conf_cur(), "aurec_pre", &aurec.pre_ms);
 	(void)conf_get_u32(conf_cur(), "aurec_post", &aurec.post_ms);
 	err = pl_strdup(&aurec.fmtp, &fmtp);
-	size_t pre_size = sz * au_calc_nsamp(aurec.srate, aurec.ch,
-					     aurec.pre_ms);
+	pre_size = sz * au_calc_nsamp(aurec.srcprm.srate, aurec.srcprm.ch,
+				      aurec.pre_ms);
 
 	err |= aubuf_alloc(&aurec.buf, 0, pre_size);
-
 	tmr_init(&aurec.tmr);
 	return err;
 }
@@ -120,18 +116,18 @@ static void ausrc_read_handler(struct auframe *af, void *arg)
 	if (!aurec.buf)
 		return;
 
-	if (af->fmt != aurec.fmt) {
+	if (af->fmt != (enum aufmt) aurec.srcprm.fmt) {
 		warning("aurec: ausrc format mismatch\n");
 		return;
 	}
 
 	aubuf_write_auframe(aurec.buf, af);
+	re_atomic_rlx_set(&aurec.ts, af->timestamp);
 
 	static uint32_t logcnt = 0;
 	if (++logcnt % 100 == 0) {
 		debug("aurec: buffered %zu ms\n",
-		      aubuf_cur_size(aurec.buf) * 1000 /
-		      (aufmt_sample_size(aurec.fmt) * aurec.ch * aurec.srate));
+		      aubuf_cur_size(aurec.buf) / auframe_size(af));
 	}
 }
 
@@ -142,18 +138,14 @@ static int start_ausrc(void)
 	if (!cfg)
 		return EINVAL;
 
+	int err = 0;
 	if (!aurec.src) {
 		const char *mod = cfg->audio.src_mod;
 		const char *dev = cfg->audio.src_dev;
-		struct ausrc_prm prm = {
-			.srate = aurec.srate,
-			.ch    = aurec.ch,
-			.ptime = PTIME,
-			.fmt   = aurec.fmt
-		};
 
-		int err = ausrc_alloc(&aurec.src, baresip_ausrcl(), mod, &prm,
-				      dev, ausrc_read_handler, NULL, NULL);
+		err = ausrc_alloc(&aurec.src, baresip_ausrcl(), mod,
+				  &aurec.srcprm,
+				  dev, ausrc_read_handler, NULL, NULL);
 		if (err) {
 			warning("aurec: could not open ausrc %s (%s)\n",
 				mod, dev);
@@ -161,11 +153,12 @@ static int start_ausrc(void)
 		}
 
 		const struct aucodec *ac;
-		ac = aucodec_find(baresip_aucodecl(), "opus", aurec.srate,
-				  aurec.ch);
+		ac = aucodec_find(baresip_aucodecl(), "opus",
+				  aurec.srcprm.srate, aurec.srcprm.ch);
 		if (!ac) {
 			warning("aurec: could not find codec opus\n");
-			return ENOENT;
+			err = ENOENT;
+			goto out;
 		}
 
 		struct auenc_param ac_prm;
@@ -174,18 +167,27 @@ static int start_ausrc(void)
 		err = ac->encupdh(&aurec.enc, ac, &ac_prm, aurec.fmtp);
 		if (err) {
 			warning("audio: could not alloc encoder (%m)\n", err);
-			return err;
+			goto out;
 		}
 
 		aurec.ac = ac;
 
-		uint32_t sampc = au_calc_nsamp(aurec.srate, aurec.ch, PTIME);
-		size_t sz = sampc * aufmt_sample_size(aurec.fmt);
+		uint32_t sampc = au_calc_nsamp(aurec.srcprm.srate,
+					       aurec.srcprm.ch, PTIME);
+		size_t sz = sampc * aufmt_sample_size(aurec.srcprm.fmt);
 		void *sampv = mem_zalloc(sz, NULL);
-		auframe_init(&aurec.af, aurec.fmt, sampv, sampc, aurec.srate,
-			     aurec.ch);
+		if (!sampv) {
+			err = ENOMEM;
+			goto out;
+		}
+
+		auframe_init(&aurec.af, aurec.srcprm.fmt, sampv, sampc,
+			     aurec.srcprm.srate, aurec.srcprm.ch);
 		info("aurec: started ausrc %s (%s)\n", mod, dev);
 	}
+out:
+	if (err)
+		stop_ausrc();
 
 	return 0;
 }
@@ -211,6 +213,16 @@ static uint64_t ms_to_ts(uint32_t ms)
 }
 
 
+static uint64_t recording_ts_start(struct aurec_recording *rec)
+{
+	if (!rec)
+		return 0;
+
+	uint64_t pre_ts = ms_to_ts(aurec.pre_ms);
+	return rec->ts > pre_ts ? rec->ts - pre_ts : 0;
+}
+
+
 static void recording_destructor(void *arg)
 {
 	struct aurec_recording *rec = arg;
@@ -226,8 +238,7 @@ static void recording_destructor(void *arg)
 	if (rec->le.next) {
 		rec = rec->le.next->data;
 
-		uint64_t pre_ts = ms_to_ts(aurec.pre_ms);
-		uint64_t ts = rec->ts > pre_ts ? rec->ts - pre_ts : 0;
+		uint64_t ts = recording_ts_start(rec);
 		uint64_t ts0, ts1;
 		bool found = false;
 		struct le *le, *len;
@@ -318,7 +329,7 @@ static void record_frame(void *arg)
 	bool marker = false;
 	size_t len = mbuf_get_space(pkt->mb);
 	err = aurec.ac->ench(aurec.enc, &marker, mbuf_buf(pkt->mb), &len,
-			     aurec.fmt, aurec.af.sampv, aurec.af.sampc);
+			     aurec.srcprm.fmt, aurec.af.sampv, aurec.af.sampc);
 	if (err) {
 		warning("aurec: opus encode failed (%m)\n", err);
 		mem_deref(pkt);
@@ -352,6 +363,45 @@ static struct aurec_recording *find_recording(const char *uuid)
 }
 
 
+const struct aurec_packet *aurec_first_packet(const char *uuid)
+{
+	struct aurec_recording *rec = find_recording(uuid);
+	if (!rec)
+		return NULL;
+
+	uint64_t ts = recording_ts_start(rec);
+	struct le *le;
+	LIST_FOREACH(&aurec.packets, le) {
+		struct aurec_packet *pkt = le->data;
+		if (pkt->ts >= ts)
+			return pkt;
+	}
+
+	return NULL;
+}
+
+
+uint64_t aurec_ts_max(const char *uuid)
+{
+	struct aurec_recording *rec = find_recording(uuid);
+	if (!rec)
+		return 0;
+
+	uint64_t ts = rec->ts + ms_to_ts(aurec.post_ms);
+	return ts;
+}
+
+
+struct aurec_packet *aurec_next_packet(const struct aurec_packet *pkt)
+{
+	if (!pkt)
+		return NULL;
+
+	struct le *le = pkt->le.next;
+	return le ? le->data : NULL;
+}
+
+
 static int add_recording(const char *uuid)
 {
 	struct aurec_recording *rec;
@@ -368,6 +418,7 @@ static int add_recording(const char *uuid)
 		return err;
 	}
 
+	rec->ts = re_atomic_rlx(&aurec.ts);
 	tmr_start(&aurec.tmr, 1, record_frame, rec);
 	tmr_start(&aurec.tmr_stop, aurec.post_ms, stop_recording, NULL);
 
