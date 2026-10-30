@@ -206,7 +206,8 @@ static void ausrc_read_handler(struct auframe *af, void *arg)
 	if (log_level_get() == LEVEL_DEBUG && ++logcnt % 100 == 0) {
 		uint32_t n = list_count(&aurec.prebuf);
 		uint32_t ms = n * aurec.srcprm.ptime;
-		debug("aurec: buffered %u ms (%u)\n", ms, n);
+		debug("aurec: buffered %u ms (%u) ts=%"PRIu64"\n", ms, n,
+		      aurec.af.timestamp);
 	}
 }
 
@@ -306,32 +307,28 @@ static uint64_t recording_ts_start(struct aurec_recording *rec)
 static void recording_destructor(void *arg)
 {
 	struct aurec_recording *rec = arg;
-
 	if (!rec)
 		return;
 
 	info("aurec: recording for uuid=%s with ts=%"PRIu64" deleted\n",
 	     rec->uuid, rec->ts);
-	list_unlink(&rec->le);
-	rec->uuid = mem_deref(rec->uuid);
 	/* delete old packets */
 	if (rec->le.next) {
-		rec = rec->le.next->data;
-
-		uint64_t ts = recording_ts_start(rec);
+		struct aurec_recording *next = rec->le.next->data;
+		uint64_t ts = recording_ts_start(next);
 		uint64_t ts0, ts1;
 		bool found = false;
 		struct le *le, *len;
 		LIST_FOREACH_SAFE(&aurec.packets, le, len) {
 			struct aurec_packet *pkt = le->data;
 			if (pkt->ts < ts) {
-				mem_deref(pkt);
 				if (!found)
 					ts0 = pkt->ts;
 				else
 					ts1 = pkt->ts;
 
 				found = true;
+				mem_deref(pkt);
 			}
 			else {
 				break;
@@ -345,6 +342,9 @@ static void recording_destructor(void *arg)
 		list_flush(&aurec.packets);
 		info("aurec: all packets deleted\n");
 	}
+
+	list_unlink(&rec->le);
+	rec->uuid = mem_deref(rec->uuid);
 }
 
 
@@ -372,9 +372,6 @@ static void record_frame(void *arg)
 	struct aurec_packet *pkt = le->data;
 	list_unlink(le);
 	append_packet(pkt);
-
-	if (!rec->ts)
-		rec->ts = pkt->ts;
 }
 
 
