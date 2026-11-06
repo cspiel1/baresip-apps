@@ -87,6 +87,7 @@ static int aurec_init(void )
 	int err = 0;
 
 	(void)conf_get_u32(conf_cur(), "aurec_srate", &aurec.srcprm.srate);
+	/* TODO: separate bitrate config for aurec */
 	(void)conf_get_u32(conf_cur(), "opus_bitrate", &aurec.bitrate);
 	(void)conf_get(conf_cur(), "opus_fmtp", &fmtp);
 	(void)conf_get_u32(conf_cur(), "aurec_pre", &aurec.pre_ms);
@@ -220,6 +221,7 @@ static int start_ausrc(void)
 
 	int err = 0;
 	if (!aurec.src) {
+		/* TODO: separate microphone config for aurec */
 		const char *mod = cfg->audio.src_mod;
 		const char *dev = cfg->audio.src_dev;
 
@@ -526,12 +528,90 @@ static int cmd_aurec(struct re_printf *pf, void *arg)
 
 	int err = add_recording(carg->prm);
 	if (err) {
-		(void)re_hprintf(pf, "failed to add recording (%m)\n", err);
+		(void)re_hprintf(pf, "aurec: failed to add recording (%m)\n",
+				 err);
 		return err;
 	}
 
 	(void)re_hprintf(pf, "aurec: uuid=%s\n", carg->prm);
 	return 0;
+}
+
+
+static struct call *find_call_peer(struct ua *ua, const char *peer)
+{
+	struct le *le;
+	LIST_FOREACH(ua_calls(ua), le) {
+		struct call *call = le->data;
+		if (!str_ncmp(call_peeruri(call), peer, str_len(peer)))
+			return call;
+	}
+
+	return NULL;
+}
+
+
+static struct call *connect_to_operator(struct re_printf *pf,
+					struct pl *dname, struct pl *sipuri,
+					struct pl *cuser, struct ua *ua)
+{
+	struct call *call = NULL;
+	char *uri = NULL;
+	int err = 0;
+
+	if (!ua && pl_isset(cuser)) {
+		ua = uag_find(cuser);
+		if (!ua) {
+			re_hprintf(pf, "could not find UA for cuser=%r\n",
+				   &cuser);
+			return NULL;
+		}
+	}
+
+	if (!ua)
+		ua = uag_find_requri_pl(sipuri);
+
+	if (!ua) {
+		re_hprintf(pf, "no User-Agent found for request URI %r\n",
+			   &sipuri);
+		return NULL;
+	}
+
+	if (pl_isset(dname)) {
+		err = re_sdprintf(&uri, "\"%r\" <%r>", &dname, &sipuri);
+	}
+	else {
+		err = account_uri_complete_strdup(ua_account(ua),
+						  &uri, sipuri);
+	}
+
+	if (err) {
+		(void)re_hprintf(pf, "failed to complete dial uri\n");
+		goto out;
+	}
+
+	re_hprintf(pf, "call uri: %s\n", uri);
+
+	/* Does call already exist? */
+	call = find_call_peer(ua, uri);
+	if (call) {
+		re_hprintf(pf, "aurec: call already exists (%s)\n",
+			   call_id(call));
+		goto out;
+	}
+
+	err  = ua_enable_autoanswer(ua, 0, ANSM_RFC5373);
+	err |= ua_connect(ua, &call, NULL, uri, VIDMODE_OFF);
+	if (err) {
+		re_hprintf(pf, "aurec: call failed (%m)\n", err);
+		goto out;
+	}
+
+	re_hprintf(pf, "aurec: call id: %s\n", call_id(call));
+out:
+	ua_disable_autoanswer(ua, ANSM_RFC5373);
+	mem_deref(uri);
+	return call;
 }
 
 
@@ -572,7 +652,8 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 		goto out;
 
 	if (!find_recording(uuid_str)) {
-		re_hprintf(pf, "no recording found for uuid=%s\n", uuid_str);
+		re_hprintf(pf, "aurec: no recording found for uuid=%s\n",
+			   uuid_str);
 		err = EINVAL;
 		goto out;
 	}
@@ -584,52 +665,8 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 
 	struct pl cuser = PL_INIT;
 	(void)cparam_decode(prm, "cuser", &cuser);
-	if (!ua && pl_isset(&cuser)) {
-		ua = uag_find(&cuser);
-		if (!ua) {
-			re_hprintf(pf, "could not find UA for cuser=%r\n",
-				   &cuser);
-			return EINVAL;
-		}
-	}
-
-	if (!ua)
-		ua = uag_find_requri_pl(&sipuri);
-
-	if (!ua) {
-		re_hprintf(pf, "no User-Agent found for request URI %r\n",
-			   &sipuri);
-		err = EINVAL;
-		goto out;
-	}
-
-	if (pl_isset(&dname)) {
-		err = re_sdprintf(&uri, "\"%r\" <%r>",
-				  &dname, &sipuri);
-	}
-	else {
-		err = account_uri_complete_strdup(ua_account(ua),
-						  &uri, &sipuri);
-	}
-
-	if (err) {
-		(void)re_hprintf(pf, "failed to complete dial uri\n");
-		goto out;
-	}
-
-	re_hprintf(pf, "call uri: %s\n", uri);
-
-	/* Set audio module and device */
-	struct call *call = NULL;
-	err  = ua_enable_autoanswer(ua, 0, ANSM_RFC5373);
-	err |= ua_connect(ua, &call, NULL, uri, VIDMODE_OFF);
-	if (err) {
-		re_hprintf(pf, "call failed (%m)\n", err);
-		mem_deref(call);
-		goto out;
-	}
-
-	re_hprintf(pf, "call id: %s\n", call_id(call));
+	struct call *call;
+	call = connect_to_operator(pf, &dname, &sipuri, &cuser,	ua);
 
 	/* switch to recording */
 	audio_set_source(call_audio(call), "aurec", uuid_str);
@@ -637,6 +674,46 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
  out:
 	mem_deref(uuid_str);
 	mem_deref(uri);
+
+	return err;
+}
+
+
+static int cmd_live(struct re_printf *pf, void *arg)
+{
+	const struct cmd_arg *carg = arg;
+	const char *prm = carg->prm;
+	struct ua *ua = carg->data;
+	int err = 0;
+
+	const char *usage = "usage: /aurec_live <sipuri>"
+			" [cuser=<string>]\n"
+			"Stream the microphone to the specified peer\n";
+
+	if (!str_isset(prm)) {
+		(void)re_hprintf(pf, "%s", usage);
+		return EINVAL;
+	}
+
+	struct pl dname = PL_INIT;
+	struct pl sipuri = PL_INIT;
+	/* with display name */
+	if (re_regex(prm, str_len(prm),
+		     "[~ \t\r\n<]*[ \t\r\n]*<[^>]+>[ \t\r\n]*",
+		     &dname, NULL, &sipuri, NULL)) {
+		/* without display name */
+		dname = pl_null;
+		pl_set_str(&sipuri, prm);
+	}
+
+	struct pl cuser = PL_INIT;
+	(void)cparam_decode(prm, "cuser", &cuser);
+	struct call *call;
+	call = connect_to_operator(pf, &dname, &sipuri, &cuser,	ua);
+
+	/* switch to microphone */
+	audio_set_source(call_audio(call), NULL, NULL);
+	call_update_media(call);
 
 	return err;
 }
@@ -675,6 +752,7 @@ static const struct cmd cmdv[] = {
 {"aurec"         ,0,    CMD_PRM, "Start audio recording",    cmd_aurec},
 {"aurec_play"    ,0,    CMD_PRM, "Play audio recording",    cmd_auplay},
 {"aurec_enable"  ,0,    CMD_PRM, "Enable/Disable audio source", cmd_enable},
+{"aurec_live"    ,0,    CMD_PRM, "Switch to the microphone", cmd_live},
 };
 
 
