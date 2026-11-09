@@ -420,13 +420,14 @@ static struct aurec_recording *find_recording(const char *uuid)
 }
 
 
-const struct aurec_packet *aurec_first_packet(const char *uuid)
+const struct aurec_packet *aurec_first_packet(const char *uuid,
+					      uint32_t pos_ms)
 {
 	struct aurec_recording *rec = find_recording(uuid);
 	if (!rec)
 		return NULL;
 
-	uint64_t ts = recording_ts_start(rec);
+	uint64_t ts = recording_ts_start(rec) + ms_to_ts(pos_ms);
 	struct le *le;
 	LIST_FOREACH(&aurec.packets, le) {
 		struct aurec_packet *pkt = le->data;
@@ -668,10 +669,11 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 	const char *prm = carg->prm;
 	struct ua *ua = carg->data;
 	char *uri = NULL;
+	char *dev = NULL;
 	int err = 0;
 
 	const char *usage = "usage: /aurec_play <uuid> <sipuri>"
-			" [cuser=<string>]\n"
+			" [cuser=<string>] [pos=ms]\n"
 			"Stream audio recording in an outgoing SIP call\n";
 
 	struct pl uuid = PL_INIT;
@@ -717,7 +719,21 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 	call = connect_to_operator(pf, &dname, &sipuri, &cuser,	ua);
 
 	/* switch to recording */
-	audio_set_source(call_audio(call), "aurec", uuid_str);
+	struct pl pos = PL_INIT;
+	(void)cparam_decode(prm, "pos", &pos);
+	if (pl_isset(&pos)) {
+		uint32_t pos_ms = 0;
+		pos_ms = pl_u32(&pos);
+		err = re_sdprintf(&dev, "%s,%u", uuid_str, pos_ms);
+		mem_deref(uuid_str);
+		if (err)
+			goto out;
+	}
+	else {
+		dev = uuid_str;
+	}
+
+	audio_set_source(call_audio(call), "aurec", dev);
 
 	struct aurec_player *player = find_player(call);
 	if (!player) {
@@ -733,7 +749,7 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 	}
 
  out:
-	mem_deref(uuid_str);
+	mem_deref(dev);
 	mem_deref(uri);
 
 	return err;

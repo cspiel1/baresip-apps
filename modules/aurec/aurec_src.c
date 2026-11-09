@@ -14,6 +14,7 @@ struct ausrc_st {
 	struct tmr tmr;
 	struct ausrc_prm prm;           /**< Audio src parameter             */
 	char *uuid;                     /**< UUID set by device parameter    */
+	uint32_t pos_ms;		/**< Start position in [ms]          */
 	const struct aucodec *ac;       /**< Audio codec of recordings       */
 	struct audec_state *dec;        /**< Audio decoder state             */
 
@@ -73,9 +74,11 @@ static int src_thread(void *arg)
 	if (!sampv)
 		return ENOMEM;
 
-	const struct aurec_packet *pkt = aurec_first_packet(st->uuid);
+	const struct aurec_packet *pkt = aurec_first_packet(st->uuid,
+							    st->pos_ms);
 	if (!pkt) {
-		warning("aurec: no packet found for uuid=%s\n", st->uuid);
+		warning("aurec: no packet found for uuid=%s at %u ms\n",
+			st->uuid, st->pos_ms);
 		goto out;
 	}
 
@@ -150,9 +153,26 @@ int aurec_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	st->errh  = errh;
 	st->arg   = arg;
 	st->ac    = aurec_codec();
-	err = str_dup(&st->uuid, dev);
-	if (err)
+	/* parse uuid,pos */
+	struct pl uuid = PL_INIT;
+	struct pl pos = PL_INIT;
+	if (re_regex(dev, str_len(dev), "[^, ]+,[^ ]+", &uuid, &pos))
+		re_regex(dev, str_len(dev), "[^ ]+", &uuid, NULL);
+
+	if (!pl_isset(&uuid)) {
+		warning("aurec: missing uuid parameter\n");
+		err = EINVAL;
 		goto out;
+	}
+
+	info("aurec: stream recording uuid=%r from pos=%r\n", &uuid, &pos);
+	pl_strdup(&st->uuid, &uuid);
+	st->pos_ms = pl_u32(&pos);
+	if (!pl_isset(&uuid)) {
+		warning("aurec: missing uuid parameter\n");
+		err = EINVAL;
+		goto out;
+	}
 
 	const struct aucodec *ac = st->ac;
 	if (!ac)

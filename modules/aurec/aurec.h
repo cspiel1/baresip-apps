@@ -18,7 +18,8 @@ int aurec_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 void aurec_get_srcprm(struct ausrc_prm *prm);
 
-const struct aurec_packet *aurec_first_packet(const char *uuid);
+const struct aurec_packet *aurec_first_packet(const char *uuid,
+					      uint32_t pos_ms);
 uint64_t aurec_ts_max(const char *uuid);
 struct aurec_packet *aurec_next_packet(const struct aurec_packet *pkt);
 const struct aucodec *aurec_codec(void);
