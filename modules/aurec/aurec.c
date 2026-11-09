@@ -53,7 +53,7 @@ struct aurec {
 	struct tmr tmr_stop;
 
 	/* call handling */
-	struct call *call;
+	struct list players;	  /**< list of recording players */
 };
 
 struct aurec_recording {
@@ -61,6 +61,13 @@ struct aurec_recording {
 
 	char *uuid;     /**< UUID of the recording */
 	uint64_t ts;    /**< Timestamp nearly at allocation */
+};
+
+struct aurec_player {
+	struct le le;
+
+	struct aurec_recording *rec;
+	struct call *call;
 };
 
 static struct aurec aurec = {
@@ -121,6 +128,7 @@ static void aurec_close(void)
 	list_flush(&aurec.recordings);
 	list_flush(&aurec.prebuf);
 	list_flush(&aurec.packets);
+	list_flush(&aurec.players);
 }
 
 
@@ -350,6 +358,19 @@ static void recording_destructor(void *arg)
 }
 
 
+static void player_destructor(void *arg)
+{
+	struct aurec_player *player = arg;
+	if (!player)
+		return;
+
+	list_unlink(&player->le);
+	debug("aurec: player for uuid=%s deleted\n",
+	      player->rec ? player->rec->uuid : "unknown");
+	player->rec = mem_deref(player->rec);
+}
+
+
 static void append_packet(struct aurec_packet *pkt)
 {
 	list_append(&aurec.packets, &pkt->le, pkt);
@@ -486,6 +507,19 @@ static int add_recording(const char *uuid)
 }
 
 
+static struct aurec_player *find_player(struct call *call)
+{
+	struct le *le;
+	LIST_FOREACH(&aurec.players, le) {
+		struct aurec_player *player = le->data;
+		if (player->call == call)
+			return player;
+	}
+
+	return NULL;
+}
+
+
 static void event_handler(enum bevent_ev ev, struct bevent *event, void *arg)
 {
 	struct call   *call = bevent_get_call(event);
@@ -493,16 +527,29 @@ static void event_handler(enum bevent_ev ev, struct bevent *event, void *arg)
 	(void) arg;
 
 	switch (ev) {
-		case BEVENT_END_OF_FILE:
+		case BEVENT_END_OF_FILE: {
 			info("aurec: switch to live %s\n", call_id(call));
 			audio_set_source(call_audio(call), NULL, NULL);
 			call_update_media(call);
-			module_event("aurec", "switch_to_live", ua, call,
-				     "uuid");
-
-			break;
+			struct aurec_player *player = find_player(call);
+			if (player && player->rec) {
+				module_event("aurec", "switch_to_live",
+					     ua, call, player->rec->uuid);
+				mem_deref(player);
+			}
+			else {
+				warning("aurec: no player found for call %s\n",
+					call_id(call));
+				module_event("aurec", "switch_to_live",
+					     ua, call, "-");
+			}
+		}
+		break;
+		case BEVENT_CALL_CLOSED:
+			 mem_deref(find_player(call));
+			 break;
 		default:
-			break;
+		break;
 	}
 }
 
@@ -651,7 +698,8 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 	if (err)
 		goto out;
 
-	if (!find_recording(uuid_str)) {
+	struct aurec_recording *rec = find_recording(uuid_str);
+	if (!rec) {
 		re_hprintf(pf, "aurec: no recording found for uuid=%s\n",
 			   uuid_str);
 		err = EINVAL;
@@ -670,6 +718,19 @@ static int cmd_auplay(struct re_printf *pf, void *arg)
 
 	/* switch to recording */
 	audio_set_source(call_audio(call), "aurec", uuid_str);
+
+	struct aurec_player *player = find_player(call);
+	if (!player) {
+		player = mem_zalloc(sizeof(*player), player_destructor);
+		if (!player) {
+			err = ENOMEM;
+			goto out;
+		}
+
+		player->rec = mem_ref(rec);
+		player->call = call;
+		list_append(&aurec.players, &player->le, player);
+	}
 
  out:
 	mem_deref(uuid_str);
@@ -710,6 +771,7 @@ static int cmd_live(struct re_printf *pf, void *arg)
 	(void)cparam_decode(prm, "cuser", &cuser);
 	struct call *call;
 	call = connect_to_operator(pf, &dname, &sipuri, &cuser,	ua);
+	mem_deref(find_player(call));
 
 	/* switch to microphone */
 	audio_set_source(call_audio(call), NULL, NULL);
